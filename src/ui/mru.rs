@@ -1902,7 +1902,7 @@ fn make_dynamic_opened_binds(config: &Config) -> Vec<Bind> {
             Action::FocusColumnFirst => Action::MruFirst,
             Action::FocusColumnLast => Action::MruLast,
             Action::CloseWindow => Action::MruCloseCurrentWindow,
-            x @ Action::Screenshot(_, _) => x.clone(),
+            x @ Action::Screenshot(_, _, _) => x.clone(),
             _ => continue,
         };
 

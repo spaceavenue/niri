@@ -399,7 +399,8 @@ pub struct Niri {
 
     pub debug_draw_opaque_regions: bool,
     pub debug_draw_damage: bool,
-
+    // pub stdout_tx: async_channel::Sender<Vec<u8>>,
+    // pub stdout_rx: async_channel::Receiver<Vec<u8>>,
     #[cfg(feature = "dbus")]
     pub dbus: Option<crate::dbus::DBusServers>,
     #[cfg(feature = "dbus")]
@@ -1966,7 +1967,12 @@ impl State {
         self.niri.output_management_state.notify_changes(new_config);
     }
 
-    pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
+    pub fn open_screenshot_ui(
+        &mut self,
+        show_pointer: bool,
+        path: Option<String>,
+        to_stdout: bool,
+    ) {
         if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
             return;
         }
@@ -1999,9 +2005,14 @@ impl State {
         }
 
         self.backend.with_primary_renderer(|renderer| {
-            self.niri
-                .screenshot_ui
-                .open(renderer, screenshots, default_output, show_pointer, path)
+            self.niri.screenshot_ui.open(
+                renderer,
+                screenshots,
+                default_output,
+                show_pointer,
+                path,
+                to_stdout,
+            )
         });
 
         self.niri
@@ -2027,15 +2038,22 @@ impl State {
     }
 
     pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open { path, .. } = &mut self.niri.screenshot_ui else {
+        let ScreenshotUi::Open {
+            path, to_stdout, ..
+        } = &mut self.niri.screenshot_ui
+        else {
             return;
         };
         let path = path.take();
+        let to_stdout = *to_stdout;
 
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    if let Err(err) =
+                        self.niri
+                            .save_screenshot(size, pixels, write_to_disk, path, to_stdout)
+                    {
                         warn!("error saving screenshot: {err:?}");
                     }
                 }
@@ -2493,6 +2511,8 @@ impl Niri {
             )
             .unwrap();
 
+        // let (stdout_tx, stdout_rx) = async_channel::bounded::<Vec<u8>>(1);
+
         drop(config_);
         let mut niri = Self {
             config,
@@ -2621,7 +2641,8 @@ impl Niri {
 
             debug_draw_opaque_regions: false,
             debug_draw_damage: false,
-
+            // stdout_tx,
+            // stdout_rx,
             #[cfg(feature = "dbus")]
             dbus: None,
             #[cfg(feature = "dbus")]
@@ -5555,6 +5576,7 @@ impl Niri {
         write_to_disk: bool,
         include_pointer: bool,
         path: Option<String>,
+        to_stdout: bool,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
 
@@ -5581,7 +5603,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot(size, pixels, write_to_disk, path, to_stdout)
             .context("error saving screenshot")
     }
 
@@ -5593,6 +5615,7 @@ impl Niri {
         write_to_disk: bool,
         show_pointer: bool,
         path: Option<String>,
+        to_stdout: bool,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
@@ -5649,7 +5672,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+        self.save_screenshot(geo.size, pixels, write_to_disk, path, to_stdout)
             .context("error saving screenshot")
     }
 
@@ -5659,6 +5682,7 @@ impl Niri {
         pixels: Vec<u8>,
         write_to_disk: bool,
         path_arg: Option<String>,
+        to_stdout: bool,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
             .then(|| {
@@ -5692,12 +5716,13 @@ impl Niri {
             })
             .unwrap();
 
-        // Prepare to send screenshot completion event back to main thread.
-        let (event_tx, event_rx) = calloop::channel::sync_channel::<Option<String>>(1);
+        // Prepare to send screenshot completion event and optionally image data back to main
+        // thread.
+        let (event_tx, event_rx) = calloop::channel::sync_channel(1);
         self.event_loop
             .insert_source(event_rx, move |event, _, state| match event {
-                calloop::channel::Event::Msg(path) => {
-                    state.ipc_screenshot_taken(path);
+                calloop::channel::Event::Msg((path, buf)) => {
+                    state.ipc_screenshot_taken(path, buf);
                 }
                 calloop::channel::Event::Closed => (),
             })
@@ -5717,6 +5742,7 @@ impl Niri {
             let _ = tx.send(buf.clone());
 
             let mut image_path = None;
+            let mut stdout_buf = None;
 
             if let Some((path, create_parent)) = path {
                 debug!("saving screenshot to {path:?}");
@@ -5734,7 +5760,7 @@ impl Niri {
                     }
                 }
 
-                match std::fs::write(&path, buf) {
+                match std::fs::write(&path, buf.clone()) {
                     Ok(()) => image_path = Some(path),
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
@@ -5743,18 +5769,22 @@ impl Niri {
             } else {
                 debug!("not saving screenshot to disk");
             }
+            if to_stdout {
+                debug!("writing screenshot to stdout");
+                stdout_buf = Some(buf.to_vec())
+            }
 
             #[cfg(feature = "dbus")]
             if let Err(err) = crate::utils::show_screenshot_notification(image_path.as_deref()) {
                 warn!("error showing screenshot notification: {err:?}");
             }
 
-            // Send screenshot completion event.
+            // Send screenshot completion event and image data.
             let path_string = image_path
                 .as_ref()
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_owned());
-            let _ = event_tx.send(path_string);
+            let _ = event_tx.send((path_string, stdout_buf));
         });
 
         Ok(())

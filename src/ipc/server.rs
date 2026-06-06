@@ -48,6 +48,7 @@ pub struct IpcServer {
     pub socket_path: Option<PathBuf>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
+    stdout_tx: Rc<RefCell<Option<async_channel::Sender<Vec<u8>>>>>,
 }
 
 struct ClientCtx {
@@ -56,6 +57,7 @@ struct ClientCtx {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
+    screenshot_data: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 struct EventStreamClient {
@@ -109,6 +111,7 @@ impl IpcServer {
             socket_path,
             event_streams: Rc::new(RefCell::new(Vec::new())),
             event_stream_state: Rc::new(RefCell::new(EventStreamState::default())),
+            stdout_tx: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -172,6 +175,7 @@ fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
         ipc_outputs: state.backend.ipc_outputs(),
         event_streams: ipc_server.event_streams.clone(),
         event_stream_state: ipc_server.event_stream_state.clone(),
+        screenshot_data: Rc::new(RefCell::new(None)),
     };
 
     let future = async move {
@@ -223,6 +227,21 @@ async fn handle_client(ctx: ClientCtx, stream: Async<'static, UnixStream>) -> an
         serde_json::to_writer(&mut buf, &reply).context("error formatting reply")?;
         buf.push(b'\n');
         write.write_all(&buf).await.context("error writing reply")?;
+
+        // Check for screenshot data, and write it to stream
+        if reply.is_ok() {
+            if let Some(data) = ctx.screenshot_data.borrow_mut().take() {
+                let len = (data.len() as u64).to_le_bytes();
+                write
+                    .write_all(&len)
+                    .await
+                    .context("error writing screenshot length")?;
+                write
+                    .write_all(&data)
+                    .await
+                    .context("error writing screenshot data")?;
+            }
+        }
 
         if requested_event_stream {
             let (events_tx, events_rx) = async_channel::bounded(EVENT_STREAM_BUFFER_SIZE);
@@ -381,21 +400,48 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::Action(action) => {
             validate_action(&action)?;
 
-            let (tx, rx) = async_channel::bounded(1);
+            // Check if the action is a screenshot which should output to stdout, in which case we
+            // receive bytes from our screenshot channel and send a ScreenshotData response.
+            if let Action::Screenshot {
+                to_stdout: true, ..
+            }
+            | Action::ScreenshotScreen {
+                to_stdout: true, ..
+            }
+            | Action::ScreenshotWindow {
+                to_stdout: true, ..
+            } = &action
+            {
+                let (tx, rx) = async_channel::bounded(1);
+                let n_action = niri_config::Action::from(action.clone());
+                ctx.event_loop.insert_idle(move |state| {
+                    if let Some(server) = &state.niri.ipc_server {
+                        *server.stdout_tx.borrow_mut() = Some(tx);
+                    }
+                    state.niri.advance_animations();
+                    state.do_action(n_action, false);
+                });
+                let bytes = rx
+                    .recv()
+                    .await
+                    .map_err(|_| String::from("error encoding screenshot image"))?;
+                *ctx.screenshot_data.borrow_mut() = Some(bytes)
+            } else {
+                let (tx, rx) = async_channel::bounded(1);
+                let n_action = niri_config::Action::from(action.clone());
+                ctx.event_loop.insert_idle(move |state| {
+                    // Make sure some logic like workspace clean-up has a chance to run before doing
+                    // actions.
+                    state.niri.advance_animations();
+                    state.do_action(n_action, false);
+                    let _ = tx.send_blocking(());
+                });
 
-            let action = niri_config::Action::from(action);
-            ctx.event_loop.insert_idle(move |state| {
-                // Make sure some logic like workspace clean-up has a chance to run before doing
-                // actions.
-                state.niri.advance_animations();
-                state.do_action(action, false);
-                let _ = tx.send_blocking(());
-            });
-
-            // Wait until the action has been processed before returning. This is important for a
-            // few actions, for instance for DoScreenTransition this wait ensures that the screen
-            // contents were sampled into the texture.
-            let _ = rx.recv().await;
+                // Wait until the action has been processed before returning. This is important for
+                // a few actions, for instance for DoScreenTransition this wait
+                // ensures that the screen contents were sampled into the texture.
+                let _ = rx.recv().await;
+            }
             Response::Handled
         }
         Request::Output { output, action } => {
@@ -932,12 +978,17 @@ impl State {
         server.send_event(event);
     }
 
-    pub fn ipc_screenshot_taken(&mut self, path: Option<String>) {
+    pub fn ipc_screenshot_taken(&mut self, path: Option<String>, buf: Option<Vec<u8>>) {
         let Some(server) = &self.niri.ipc_server else {
             return;
         };
         let mut state = server.event_stream_state.borrow_mut();
 
+        if let Some(image_data) = buf {
+            if let Some(tx) = server.stdout_tx.borrow_mut().take() {
+                let _ = tx.send_blocking(image_data);
+            }
+        }
         let event = Event::ScreenshotCaptured { path };
         state.apply(event.clone());
         server.send_event(event);

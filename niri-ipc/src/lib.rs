@@ -233,6 +233,12 @@ pub enum Action {
         /// If `None`, the screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
         path: Option<String>,
+
+        /// Output the screenshot to standard output
+        ///
+        /// False by default
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::SetTrue))]
+        to_stdout: bool,
     },
     /// Screenshot the focused screen.
     ScreenshotScreen {
@@ -253,6 +259,11 @@ pub enum Action {
         /// If `None`, the screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
         path: Option<String>,
+        /// Output the screenshot to standard output
+        ///
+        /// False by default
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::SetTrue))]
+        to_stdout: bool,
     },
     /// Screenshot a window.
     #[cfg_attr(feature = "clap", clap(about = "Screenshot the focused window"))]
@@ -282,6 +293,11 @@ pub enum Action {
         /// If `None`, the screenshot is saved according to the `screenshot-path` config setting.
         #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
         path: Option<String>,
+        /// Output the screenshot to standard output
+        ///
+        /// False by default
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::SetTrue))]
+        to_stdout: bool,
     },
     /// Enable or disable the keyboard shortcuts inhibitor (if any) for the focused surface.
     ToggleKeyboardShortcutsInhibit {},

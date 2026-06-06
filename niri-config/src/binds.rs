@@ -127,18 +127,21 @@ pub enum Action {
         #[knuffel(property(name = "show-pointer"), default = true)] bool,
         // Path; not settable from knuffel
         Option<String>,
+        #[knuffel(property(name = "to-stdout"), default = false)] bool,
     ),
     ScreenshotScreen(
         #[knuffel(property(name = "write-to-disk"), default = true)] bool,
         #[knuffel(property(name = "show-pointer"), default = true)] bool,
         // Path; not settable from knuffel
         Option<String>,
+        #[knuffel(property(name = "to-stdout"), default = false)] bool,
     ),
     ScreenshotWindow(
         #[knuffel(property(name = "write-to-disk"), default = true)] bool,
         #[knuffel(property(name = "show-pointer"), default = false)] bool,
         // Path; not settable from knuffel
         Option<String>,
+        #[knuffel(property(name = "to-stdout"), default = false)] bool,
     ),
     #[knuffel(skip)]
     ScreenshotWindowById {
@@ -146,6 +149,7 @@ pub enum Action {
         write_to_disk: bool,
         show_pointer: bool,
         path: Option<String>,
+        to_stdout: bool,
     },
     ToggleKeyboardShortcutsInhibit,
     CloseWindow,
@@ -404,30 +408,36 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::Spawn { command } => Self::Spawn(command),
             niri_ipc::Action::SpawnSh { command } => Self::SpawnSh(command),
             niri_ipc::Action::DoScreenTransition { delay_ms } => Self::DoScreenTransition(delay_ms),
-            niri_ipc::Action::Screenshot { show_pointer, path } => {
-                Self::Screenshot(show_pointer, path)
-            }
+            niri_ipc::Action::Screenshot {
+                show_pointer,
+                path,
+                to_stdout,
+            } => Self::Screenshot(show_pointer, path, to_stdout),
             niri_ipc::Action::ScreenshotScreen {
                 write_to_disk,
                 show_pointer,
                 path,
-            } => Self::ScreenshotScreen(write_to_disk, show_pointer, path),
+                to_stdout,
+            } => Self::ScreenshotScreen(write_to_disk, show_pointer, path, to_stdout),
             niri_ipc::Action::ScreenshotWindow {
                 id: None,
                 write_to_disk,
                 show_pointer,
                 path,
-            } => Self::ScreenshotWindow(write_to_disk, show_pointer, path),
+                to_stdout,
+            } => Self::ScreenshotWindow(write_to_disk, show_pointer, path, to_stdout),
             niri_ipc::Action::ScreenshotWindow {
                 id: Some(id),
                 write_to_disk,
                 show_pointer,
                 path,
+                to_stdout,
             } => Self::ScreenshotWindowById {
                 id,
                 write_to_disk,
                 show_pointer,
                 path,
+                to_stdout,
             },
             niri_ipc::Action::ToggleKeyboardShortcutsInhibit {} => {
                 Self::ToggleKeyboardShortcutsInhibit
