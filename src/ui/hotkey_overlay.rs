@@ -263,7 +263,7 @@ fn collect_actions(config: &Config) -> Vec<&Action> {
     // Screenshot is not as important, can omit if not bound.
     if let Some(bind) = binds
         .iter()
-        .find(|bind| matches!(bind.action, Action::Screenshot(_, _)))
+        .find(|bind| matches!(bind.action, Action::Screenshot(_, _, _)))
     {
         actions.push(&bind.action);
     }
@@ -479,7 +479,7 @@ fn action_name(action: &Action) -> String {
             String::from("Switch Focus Between Floating and Tiling")
         }
         Action::ToggleOverview => String::from("Open the Overview"),
-        Action::Screenshot(_, _) => String::from("Take a Screenshot"),
+        Action::Screenshot(_, _, _) => String::from("Take a Screenshot"),
         Action::Spawn(args) => format!(
             "Spawn <span face='monospace' bgcolor='#000000'>{}</span>",
             args.first().unwrap_or(&String::new())
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn test_format_bind() {
         // Not bound.
-        assert_snapshot!(check("", Action::Screenshot(true, None)), @" (not bound) : Take a Screenshot");
+        assert_snapshot!(check("", Action::Screenshot(true, None, false)), @" (not bound) : Take a Screenshot");
 
         // Bound with a default title.
         assert_snapshot!(
@@ -638,7 +638,7 @@ mod tests {
                 r#"binds {
                     Mod+P { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" Super + P : Take a Screenshot"
         );
@@ -649,7 +649,7 @@ mod tests {
                 r#"binds {
                     Mod+P hotkey-overlay-title="Hello" { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" Super + P : Hello"
         );
@@ -661,7 +661,7 @@ mod tests {
                     Mod+P { screenshot; }
                     Print { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" Super + P : Take a Screenshot"
         );
@@ -673,7 +673,7 @@ mod tests {
                     Mod+P { screenshot; }
                     Print hotkey-overlay-title="My Cool Bind" { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" PrtSc : My Cool Bind"
         );
@@ -685,7 +685,7 @@ mod tests {
                     Mod+P hotkey-overlay-title="First" { screenshot; }
                     Print hotkey-overlay-title="My Cool Bind" { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" Super + P : First"
         );
@@ -697,7 +697,7 @@ mod tests {
                     Mod+P { screenshot; }
                     Print hotkey-overlay-title=null { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @"None"
         );
@@ -709,7 +709,7 @@ mod tests {
                     Mod+P hotkey-overlay-title="Hello" { screenshot; }
                     Print hotkey-overlay-title=null { screenshot; }
                 }"#,
-                Action::Screenshot(true, None),
+                Action::Screenshot(true, None, false),
             ),
             @" Super + P : Hello"
         );

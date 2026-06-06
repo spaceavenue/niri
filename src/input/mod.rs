@@ -752,7 +752,7 @@ impl State {
                     self.niri.do_screen_transition(renderer, delay_ms);
                 });
             }
-            Action::ScreenshotScreen(write_to_disk, show_pointer, path) => {
+            Action::ScreenshotScreen(write_to_disk, show_pointer, path, to_stdout) => {
                 let active = self.niri.layout.active_output().cloned();
                 if let Some(active) = active {
                     self.backend.with_primary_renderer(|renderer| {
@@ -762,6 +762,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            to_stdout,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -786,11 +787,11 @@ impl State {
                 self.niri.screenshot_ui.toggle_pointer();
                 self.niri.queue_redraw_all();
             }
-            Action::Screenshot(show_cursor, path) => {
-                self.open_screenshot_ui(show_cursor, path);
+            Action::Screenshot(show_cursor, path, to_stdout) => {
+                self.open_screenshot_ui(show_cursor, path, to_stdout);
                 self.niri.cancel_mru();
             }
-            Action::ScreenshotWindow(write_to_disk, show_pointer, path) => {
+            Action::ScreenshotWindow(write_to_disk, show_pointer, path, to_stdout) => {
                 let focus = self.niri.layout.focus_with_output();
                 if let Some((mapped, output)) = focus {
                     self.backend.with_primary_renderer(|renderer| {
@@ -801,6 +802,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            to_stdout,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -812,6 +814,7 @@ impl State {
                 write_to_disk,
                 show_pointer,
                 path,
+                to_stdout,
             } => {
                 let mut windows = self.niri.layout.windows();
                 let window = windows.find(|(_, m)| m.id().get() == id);
@@ -825,6 +828,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            to_stdout,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
