@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::iter::Peekable;
 use std::path::Path;
 use std::{env, slice};
@@ -317,7 +317,40 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!("No color was picked.");
             }
         }
-        Msg::Action { .. } => {
+        Msg::Action { action } => {
+            if let Action::Screenshot {
+                to_stdout: true, ..
+            }
+            | Action::ScreenshotScreen {
+                to_stdout: true, ..
+            }
+            | Action::ScreenshotWindow {
+                to_stdout: true, ..
+            } = action
+            {
+                // Read first 8 bytes to get the screenshot length.
+                let mut len_buf = [0u8; 8];
+                socket
+                    .read_exact(&mut len_buf)
+                    .context("error reading screenshot size")?;
+                let len = u64::from_le_bytes(len_buf) as usize;
+
+                // Read the next `len` bytes to get the screenshot data.
+                let mut png = vec![0u8; len];
+                socket
+                    .read_exact(&mut png)
+                    .context("error reading screenshot data")?;
+
+                // Default SIGPIPE so that our prints don't panic on stdout closing.
+                unsafe {
+                    libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+                }
+
+                // Write screenshot to stdout.
+                std::io::stdout()
+                    .write_all(png.as_slice())
+                    .context("error writing to stdout")?;
+            }
             let Response::Handled = response else {
                 bail!("unexpected response: expected Handled, got {response:?}");
             };
