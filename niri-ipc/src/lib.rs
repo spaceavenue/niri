@@ -85,6 +85,12 @@ pub enum Request {
     PickWindow,
     /// Request picking a color from the screen.
     PickColor,
+    /// Request screenshot image data as raw bytes.
+    ScreenshotStdout {
+        /// The screenshot target, mirrors the existing Action::Screenshot variants: interactive,
+        /// window and screen.
+        target: ScreenshotStdoutTarget,
+    },
     /// Perform an action.
     Action(Action),
     /// Change output configuration temporarily.
@@ -159,6 +165,9 @@ pub enum Response {
     PickedWindow(Option<Window>),
     /// Information about the picked color.
     PickedColor(Option<PickedColor>),
+    /// Response signifying incoming screenshot data on stdout. Allows a client to match against
+    /// this and handle reading screenshot data from stdout properly.
+    ScreenshotData,
     /// Output configuration change result.
     OutputConfigChanged(OutputConfigChanged),
     /// Information about the overview.
@@ -181,6 +190,39 @@ pub struct Overview {
 pub struct PickedColor {
     /// Color values as red, green, blue, each ranging from 0.0 to 1.0.
     pub rgb: [f64; 3],
+}
+
+/// Target for [`Request::ScreenshotStdout`].
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "clap", derive(clap::Subcommand))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum ScreenshotStdoutTarget {
+    /// Open the interactive screenshot UI and screenshot the user's selection.
+    Interactive {
+        /// Whether to show the mouse pointer by default in the screenshot UI.
+        #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
+        show_pointer: bool,
+    },
+    /// Screenshot the focused screen.
+    Screen {
+        /// Whether to include the mouse pointer in the screenshot.
+        #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
+        show_pointer: bool,
+    },
+    /// Screenshot a window.
+    Window {
+        /// Id of the window to screenshot.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+        /// Whether to include the mouse pointer in the screenshot.
+        ///
+        /// The pointer will be included only if the window is currently receiving pointer input
+        /// (usually this means the pointer is on top of the window).
+        #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = false))]
+        show_pointer: bool,
+    },
 }
 
 /// Actions that niri can perform.
