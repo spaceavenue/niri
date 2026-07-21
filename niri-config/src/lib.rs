@@ -1483,6 +1483,7 @@ mod tests {
                 ],
                 center_focused_column: OnOverflow,
                 always_center_single_column: false,
+                center_single_window: false,
                 empty_workspace_above_first: false,
                 default_column_display: Tabbed,
                 gaps: 8.0,
@@ -1926,6 +1927,8 @@ mod tests {
                             saturation: None,
                         },
                     },
+                    force_render: None,
+                    force_render_fps: None,
                 },
             ],
             layer_rules: [

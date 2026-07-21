@@ -18,7 +18,7 @@ use niri_config::OutputName;
 use niri_ipc::state::{EventStreamState, EventStreamStatePart as _};
 use niri_ipc::{
     Action, Event, KeyboardLayouts, OutputConfigChanged, Overview, Reply, Request, Response,
-    Timestamp, WindowLayout, Workspace,
+    ScreenshotStdoutTarget, Timestamp, WindowLayout, Workspace,
 };
 use smithay::desktop::layer_map_for_output;
 use smithay::input::pointer::{
@@ -56,6 +56,7 @@ struct ClientCtx {
     ipc_outputs: Arc<Mutex<IpcOutputMap>>,
     event_streams: Rc<RefCell<Vec<EventStreamSender>>>,
     event_stream_state: Rc<RefCell<EventStreamState>>,
+    screenshot_data: Rc<RefCell<Option<Vec<u8>>>>,
 }
 
 struct EventStreamClient {
@@ -172,6 +173,7 @@ fn on_new_ipc_client(state: &mut State, stream: UnixStream) {
         ipc_outputs: state.backend.ipc_outputs(),
         event_streams: ipc_server.event_streams.clone(),
         event_stream_state: ipc_server.event_stream_state.clone(),
+        screenshot_data: Rc::new(RefCell::new(None)),
     };
 
     let future = async move {
@@ -223,6 +225,21 @@ async fn handle_client(ctx: ClientCtx, stream: Async<'static, UnixStream>) -> an
         serde_json::to_writer(&mut buf, &reply).context("error formatting reply")?;
         buf.push(b'\n');
         write.write_all(&buf).await.context("error writing reply")?;
+
+        // Check for screenshot data, and write it to stream
+        if reply.is_ok() {
+            if let Some(data) = ctx.screenshot_data.borrow_mut().take() {
+                let len = (data.len() as u64).to_le_bytes();
+                write
+                    .write_all(&len)
+                    .await
+                    .context("error writing screenshot length")?;
+                write
+                    .write_all(&data)
+                    .await
+                    .context("error writing screenshot data")?;
+            }
+        }
 
         if requested_event_stream {
             let (events_tx, events_rx) = async_channel::bounded(EVENT_STREAM_BUFFER_SIZE);
@@ -378,23 +395,88 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let color = result.map_err(|_| String::from("error getting picked color"))?;
             Response::PickedColor(color)
         }
+        Request::ScreenshotStdout { target } => {
+            let (tx, rx) = async_channel::bounded(1);
+            ctx.event_loop.insert_idle(move |state| {
+                state.niri.advance_animations();
+                match target {
+                    ScreenshotStdoutTarget::Screen { show_pointer } => {
+                        let active = state.niri.layout.active_output().cloned();
+                        if let Some(active) = active {
+                            state.backend.with_primary_renderer(|renderer| {
+                                if let Err(err) = state.niri.screenshot(
+                                    renderer,
+                                    &active,
+                                    false,
+                                    show_pointer,
+                                    None,
+                                    Some(tx),
+                                ) {
+                                    warn!("error taking screenshot: {err:?}");
+                                }
+                            });
+                        }
+                    }
+                    ScreenshotStdoutTarget::Window { id, show_pointer } => {
+                        let focus = match id {
+                            Some(id) => {
+                                let mut windows = state.niri.layout.windows();
+                                windows.find(|(_, m)| m.id().get() == id).and_then(
+                                    |(monitor, mapped)| {
+                                        monitor.map(|monitor| (monitor.output().clone(), mapped))
+                                    },
+                                )
+                            }
+                            None => state
+                                .niri
+                                .layout
+                                .focus_with_output()
+                                .map(|(mapped, output)| (output.clone(), mapped)),
+                        };
+                        if let Some((output, mapped)) = focus {
+                            state.backend.with_primary_renderer(|renderer| {
+                                if let Err(err) = state.niri.screenshot_window(
+                                    renderer,
+                                    &output,
+                                    mapped,
+                                    false,
+                                    show_pointer,
+                                    None,
+                                    Some(tx),
+                                ) {
+                                    warn!("error taking screenshot: {err:?}");
+                                }
+                            });
+                        }
+                    }
+                    ScreenshotStdoutTarget::Interactive { show_pointer } => {
+                        state.open_screenshot_ui(show_pointer, None, Some(tx));
+                    }
+                }
+            });
+            let bytes = rx
+                .recv()
+                .await
+                .map_err(|_| String::from("error encoding screenshot image"))?;
+            *ctx.screenshot_data.borrow_mut() = Some(bytes);
+            Response::ScreenshotData
+        }
         Request::Action(action) => {
             validate_action(&action)?;
 
             let (tx, rx) = async_channel::bounded(1);
-
-            let action = niri_config::Action::from(action);
+            let n_action = niri_config::Action::from(action.clone());
             ctx.event_loop.insert_idle(move |state| {
                 // Make sure some logic like workspace clean-up has a chance to run before doing
                 // actions.
                 state.niri.advance_animations();
-                state.do_action(action, false);
+                state.do_action(n_action, false);
                 let _ = tx.send_blocking(());
             });
 
-            // Wait until the action has been processed before returning. This is important for a
-            // few actions, for instance for DoScreenTransition this wait ensures that the screen
-            // contents were sampled into the texture.
+            // Wait until the action has been processed before returning. This is important for
+            // a few actions, for instance for DoScreenTransition this wait
+            // ensures that the screen contents were sampled into the texture.
             let _ = rx.recv().await;
             Response::Handled
         }
