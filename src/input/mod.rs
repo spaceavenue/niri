@@ -814,6 +814,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -839,7 +840,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::Screenshot(show_cursor, path) => {
-                self.open_screenshot_ui(show_cursor, path);
+                self.open_screenshot_ui(show_cursor, path, None);
                 self.niri.cancel_mru();
             }
             Action::ScreenshotWindow(write_to_disk, show_pointer, path) => {
@@ -853,6 +854,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -877,6 +879,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
