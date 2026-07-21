@@ -611,6 +611,16 @@ impl Mapped {
     pub fn capture_bbox(&self, scale: Scale<f64>) -> Rectangle<i32, Physical> {
         self.window.bbox_with_popups().to_physical_precise_up(scale)
     }
+
+    /// The forced rendering frame rate in millihertz if enabled (either due to
+    /// the window rule or due to being a cast target), or `None` if disabled.
+    pub fn force_render(&self) -> Option<u32> {
+        if self.is_window_cast_target {
+            Some(0) // use last output's refresh rate
+        } else {
+            self.rules.force_render.map(|fps| fps as u32 * 1000)
+        }
+    }
 }
 
 impl Drop for Mapped {

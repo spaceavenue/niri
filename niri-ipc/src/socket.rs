@@ -1,7 +1,7 @@
 //! Helper for blocking communication over the niri socket.
 
 use std::env;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -97,5 +97,9 @@ impl Socket {
             let event = serde_json::from_str(&buf)?;
             Ok(event)
         }
+    }
+    /// Reads the exact amount of data needed to fill out the buffer.
+    pub fn read_exact(&mut self, data: &mut [u8]) -> io::Result<()> {
+        self.stream.read_exact(data)
     }
 }

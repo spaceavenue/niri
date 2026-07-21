@@ -150,9 +150,10 @@ new_without_default = "allow"
 collapsible_match = "allow"
 
 [profile.release]
-debug = "line-tables-only"
+opt-level = 3
+lto = "fat"
+strip = "symbols"
 overflow-checks = true
-lto = "thin"
 
 [profile.release.package.niri-config]
 # knuffel with chomsky generates a metric ton of debuginfo.
