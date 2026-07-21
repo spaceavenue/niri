@@ -1,4 +1,4 @@
-use std::io::{BufRead as _, ErrorKind};
+use std::io::{BufRead as _, ErrorKind, Write};
 use std::iter::Peekable;
 use std::path::Path;
 use std::{env, slice};
@@ -36,6 +36,10 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
         Msg::FocusedOutput => Request::FocusedOutput,
         Msg::PickWindow => Request::PickWindow,
         Msg::PickColor => Request::PickColor,
+        Msg::ScreenshotStdout { target } => Request::ScreenshotStdout {
+            target: target.clone(),
+        },
+        Msg::PickRegion => Request::PickRegion,
         Msg::Action { action } => Request::Action(action.clone()),
         Msg::Output { output, action } => Request::Output {
             output: output.clone(),
@@ -331,6 +335,51 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                 println!("Hex: #{r:02x}{g:02x}{b:02x}");
             } else {
                 println!("No color was picked.");
+            }
+        }
+        Msg::ScreenshotStdout { .. } => {
+            let Response::ScreenshotData = response else {
+                bail!("unexpected response: expected ScreenshotData, got {response:?}");
+            };
+
+            // Read first 8 bytes to get the screenshot length.
+            let mut len_buf = [0u8; 8];
+            socket
+                .read_exact(&mut len_buf)
+                .context("error reading screenshot size")?;
+            let len = u64::from_le_bytes(len_buf) as usize;
+
+            // Read the next `len` bytes to get the screenshot data.
+            let mut png = vec![0u8; len];
+            socket
+                .read_exact(&mut png)
+                .context("error reading screenshot data")?;
+
+            // Default SIGPIPE so that our prints don't panic on stdout closing.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+
+            // Write screenshot to stdout.
+            std::io::stdout()
+                .write_all(png.as_slice())
+                .context("error writing to stdout")?;
+        }
+        Msg::PickRegion => {
+            let Response::PickedRegion(region) = response else {
+                bail!("unexpected response: expected PickedRegion, got {response:?}");
+            };
+
+            if json {
+                let region = serde_json::to_string(&region).context("error formatting response")?;
+                println!("{region}");
+                return Ok(());
+            }
+
+            if let Some(region) = region {
+                println!("{region}");
+            } else {
+                bail!("selection cancelled.");
             }
         }
         Msg::Action { .. } => {
