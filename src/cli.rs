@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
-use niri_ipc::{Action, OutputAction};
+use niri_ipc::{Action, OutputAction, ScreenshotStdoutTarget};
 
 use crate::utils::version;
 
@@ -79,6 +79,13 @@ pub enum Msg {
     PickWindow,
     /// Pick a color from the screen with the mouse.
     PickColor,
+    /// Request screenshot image data as raw bytes.
+    ScreenshotStdout {
+        /// The screenshot target, mirrors the existing Action::Screenshot variants: interactive,
+        /// window and screen.
+        #[command(subcommand)]
+        target: ScreenshotStdoutTarget,
+    },
     /// Perform an action.
     Action {
         #[command(subcommand)]

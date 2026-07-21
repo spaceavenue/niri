@@ -1,4 +1,4 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::iter::Peekable;
 use std::path::Path;
 use std::{env, slice};
@@ -36,6 +36,9 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
         Msg::FocusedOutput => Request::FocusedOutput,
         Msg::PickWindow => Request::PickWindow,
         Msg::PickColor => Request::PickColor,
+        Msg::ScreenshotStdout { target } => Request::ScreenshotStdout {
+            target: target.clone(),
+        },
         Msg::Action { action } => Request::Action(action.clone()),
         Msg::Output { output, action } => Request::Output {
             output: output.clone(),
@@ -316,6 +319,34 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
             } else {
                 println!("No color was picked.");
             }
+        }
+        Msg::ScreenshotStdout { .. } => {
+            let Response::ScreenshotData = response else {
+                bail!("unexpected response: expected ScreenshotData, got {response:?}");
+            };
+
+            // Read first 8 bytes to get the screenshot length.
+            let mut len_buf = [0u8; 8];
+            socket
+                .read_exact(&mut len_buf)
+                .context("error reading screenshot size")?;
+            let len = u64::from_le_bytes(len_buf) as usize;
+
+            // Read the next `len` bytes to get the screenshot data.
+            let mut png = vec![0u8; len];
+            socket
+                .read_exact(&mut png)
+                .context("error reading screenshot data")?;
+
+            // Default SIGPIPE so that our prints don't panic on stdout closing.
+            unsafe {
+                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+            }
+
+            // Write screenshot to stdout.
+            std::io::stdout()
+                .write_all(png.as_slice())
+                .context("error writing to stdout")?;
         }
         Msg::Action { .. } => {
             let Response::Handled = response else {
