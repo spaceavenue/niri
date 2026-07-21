@@ -418,7 +418,6 @@ pub struct Niri {
 
     pub debug_draw_opaque_regions: bool,
     pub debug_draw_damage: bool,
-
     #[cfg(feature = "dbus")]
     pub dbus: Option<crate::dbus::DBusServers>,
     #[cfg(feature = "dbus")]
@@ -2087,7 +2086,12 @@ impl State {
         self.niri.output_management_state.notify_changes(new_config);
     }
 
-    pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
+    pub fn open_screenshot_ui(
+        &mut self,
+        show_pointer: bool,
+        path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
+    ) {
         if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
             return;
         }
@@ -2125,9 +2129,14 @@ impl State {
         }
 
         self.backend.with_primary_renderer(|renderer| {
-            self.niri
-                .screenshot_ui
-                .open(renderer, screenshots, default_output, show_pointer, path)
+            self.niri.screenshot_ui.open(
+                renderer,
+                screenshots,
+                default_output,
+                show_pointer,
+                path,
+                stdout_tx,
+            )
         });
 
         self.niri
@@ -2153,15 +2162,22 @@ impl State {
     }
 
     pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open { path, .. } = &mut self.niri.screenshot_ui else {
+        let ScreenshotUi::Open {
+            path, stdout_tx, ..
+        } = &mut self.niri.screenshot_ui
+        else {
             return;
         };
         let path = path.take();
+        let stdout_tx = stdout_tx.take();
 
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    if let Err(err) =
+                        self.niri
+                            .save_screenshot(size, pixels, write_to_disk, path, stdout_tx)
+                    {
                         warn!("error saving screenshot: {err:?}");
                     }
                 }
@@ -2628,6 +2644,8 @@ impl Niri {
             )
             .unwrap();
 
+        // let (stdout_tx, stdout_rx) = async_channel::bounded::<Vec<u8>>(1);
+
         drop(config_);
         let mut niri = Self {
             config,
@@ -2762,7 +2780,8 @@ impl Niri {
 
             debug_draw_opaque_regions: false,
             debug_draw_damage: false,
-
+            // stdout_tx,
+            // stdout_rx,
             #[cfg(feature = "dbus")]
             dbus: None,
             #[cfg(feature = "dbus")]
@@ -6099,6 +6118,7 @@ impl Niri {
         write_to_disk: bool,
         include_pointer: bool,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
 
@@ -6125,7 +6145,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot(size, pixels, write_to_disk, path, stdout_tx)
             .context("error saving screenshot")
     }
 
@@ -6137,6 +6157,7 @@ impl Niri {
         write_to_disk: bool,
         show_pointer: bool,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
@@ -6193,7 +6214,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+        self.save_screenshot(geo.size, pixels, write_to_disk, path, stdout_tx)
             .context("error saving screenshot")
     }
 
@@ -6203,6 +6224,7 @@ impl Niri {
         pixels: Vec<u8>,
         write_to_disk: bool,
         path_arg: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
             .then(|| {
@@ -6237,7 +6259,7 @@ impl Niri {
             .unwrap();
 
         // Prepare to send screenshot completion event back to main thread.
-        let (event_tx, event_rx) = calloop::channel::sync_channel::<Option<String>>(1);
+        let (event_tx, event_rx) = calloop::channel::sync_channel(1);
         self.event_loop
             .insert_source(event_rx, move |event, _, state| match event {
                 calloop::channel::Event::Msg(path) => {
@@ -6260,6 +6282,11 @@ impl Niri {
             let buf: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
             let _ = tx.send(buf.clone());
 
+            if let Some(stdout_tx) = stdout_tx {
+                debug!("sending image data to stdout.");
+                let _ = stdout_tx.send_blocking(buf.clone().to_vec());
+            }
+
             let mut image_path = None;
 
             if let Some((path, create_parent)) = path {
@@ -6278,7 +6305,7 @@ impl Niri {
                     }
                 }
 
-                match std::fs::write(&path, buf) {
+                match std::fs::write(&path, buf.clone()) {
                     Ok(()) => image_path = Some(path),
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
@@ -6293,7 +6320,7 @@ impl Niri {
                 warn!("error showing screenshot notification: {err:?}");
             }
 
-            // Send screenshot completion event.
+            // Send screenshot completion event and image data.
             let path_string = image_path
                 .as_ref()
                 .and_then(|p| p.to_str())
