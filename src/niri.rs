@@ -181,6 +181,7 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
+use crate::ui::region_select::RegionSelectUi;
 use crate::ui::screen_transition::{self, ScreenTransition};
 use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
@@ -189,9 +190,9 @@ use crate::utils::vblank_throttle::VBlankThrottle;
 use crate::utils::watcher::Watcher;
 use crate::utils::xwayland::satellite::Satellite;
 use crate::utils::{
-    center, center_f64, expand_home, get_monotonic_time, ipc_transform_to_smithay, is_mapped,
-    logical_output, make_screenshot_path, output_matches_name, output_size, panel_orientation,
-    send_scale_transform, winit_scale, write_png_rgba8, xwayland,
+    center, center_f64, expand_home, frequency_to_period, get_monotonic_time,
+    ipc_transform_to_smithay, is_mapped, logical_output, make_screenshot_path, output_matches_name,
+    output_size, panel_orientation, send_scale_transform, winit_scale, write_png_rgba8, xwayland,
 };
 use crate::window::mapped::MappedId;
 use crate::window::{InitialConfigureState, Mapped, ResolvedWindowRules, Unmapped, WindowRef};
@@ -435,6 +436,7 @@ pub struct Niri {
     // State that we last sent to the logind LockedHint.
     pub locked_hint: Option<bool>,
 
+    pub region_select_ui: RegionSelectUi,
     pub screenshot_ui: ScreenshotUi,
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
@@ -445,10 +447,10 @@ pub struct Niri {
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
+    pub pick_region: Option<async_channel::Sender<Option<niri_ipc::PickedRegion>>>,
 
     pub debug_draw_opaque_regions: bool,
     pub debug_draw_damage: bool,
-
     #[cfg(feature = "dbus")]
     pub dbus: Option<crate::dbus::DBusServers>,
     #[cfg(feature = "dbus")]
@@ -625,6 +627,11 @@ struct SurfaceFrameThrottlingState {
     last_sent_at: RefCell<Option<(Output, u32)>>,
 }
 
+struct SurfaceForceRenderState {
+    /// Whether a forced render is scheduled in the event loop.
+    scheduled: Cell<bool>,
+}
+
 pub enum CenterCoords {
     Separately,
     Both,
@@ -715,6 +722,94 @@ impl Default for SurfaceFrameThrottlingState {
             last_sent_at: RefCell::new(None),
         }
     }
+}
+impl Default for SurfaceForceRenderState {
+    fn default() -> Self {
+        Self {
+            scheduled: Cell::new(false),
+        }
+    }
+}
+
+pub fn setup_force_render(event_loop: &mut LoopHandle<'static, State>, mapped: &Mapped) -> bool {
+    if mapped.force_render().is_none() {
+        return false;
+    }
+
+    let already_scheduled = with_states(mapped.toplevel().wl_surface(), |states| {
+        let force_render_state = states
+            .data_map
+            .get_or_insert(SurfaceForceRenderState::default);
+        force_render_state.scheduled.replace(true)
+    });
+    if already_scheduled {
+        return false;
+    }
+
+    let mapped_id = mapped.id();
+    let res = event_loop.insert_source(Timer::immediate(), move |_, _, state| {
+        force_render_callback(state, mapped_id)
+    });
+    match res {
+        Ok(_) => true,
+        Err(e) => {
+            warn!("error scheduling forced render: {e}");
+            false
+        }
+    }
+}
+
+fn force_render_callback(state: &mut State, mapped_id: MappedId) -> TimeoutAction {
+    let Some((output_rate, mapped)) = state
+        .niri
+        .layout
+        .workspaces_mut()
+        .flat_map(|ws| {
+            let rate = ws
+                .current_output()
+                .and_then(|out| out.current_mode())
+                .map(|mode| mode.refresh)
+                .unwrap_or(0);
+            ws.windows_mut().map(move |win| (rate, win))
+        })
+        .find(|(_, win)| win.id() == mapped_id)
+    else {
+        return TimeoutAction::Drop;
+    };
+
+    let Some(period) = with_states(mapped.toplevel().wl_surface(), |states| {
+        let Some(rate) = mapped.force_render() else {
+            let force_render_state = states
+                .data_map
+                .get_or_insert(SurfaceForceRenderState::default);
+            force_render_state.scheduled.set(false);
+            return None;
+        };
+
+        let period = std::cmp::max(
+            frequency_to_period(rate),
+            frequency_to_period(output_rate as u32),
+        );
+        Some(period)
+    }) else {
+        return TimeoutAction::Drop;
+    };
+
+    let output = &Output::new(
+        String::new(),
+        PhysicalProperties {
+            size: Size::from((0, 0)),
+            subpixel: Subpixel::Unknown,
+            make: String::new(),
+            model: String::new(),
+            serial_number: String::new(),
+        },
+    );
+    let frame_callback_time = get_monotonic_time();
+
+    mapped.send_frame(output, frame_callback_time, Some(period), |_, _| None);
+
+    TimeoutAction::ToDuration(period)
 }
 
 impl KeyboardFocus {
@@ -1189,6 +1284,7 @@ impl State {
         if !self.niri.exit_confirm_dialog.is_open()
             && !self.niri.is_locked()
             && !self.niri.screenshot_ui.is_open()
+            && !self.niri.region_select_ui.is_open()
         {
             // Don't refresh cursor focus during transitions.
             if let Some((output, _)) = self.niri.output_under(location) {
@@ -2211,8 +2307,16 @@ impl State {
         self.niri.output_management_state.notify_changes(new_config);
     }
 
-    pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
-        if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
+    pub fn open_screenshot_ui(
+        &mut self,
+        show_pointer: bool,
+        path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
+    ) {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.region_select_ui.is_open()
+        {
             return;
         }
 
@@ -2237,9 +2341,14 @@ impl State {
         self.cancel_pointing_grabs();
 
         self.backend.with_primary_renderer(|renderer| {
-            self.niri
-                .screenshot_ui
-                .open(renderer, screenshots, default_output, show_pointer, path)
+            self.niri.screenshot_ui.open(
+                renderer,
+                screenshots,
+                default_output,
+                show_pointer,
+                path,
+                stdout_tx,
+            )
         });
 
         self.niri
@@ -2281,16 +2390,87 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
-    pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open { path, .. } = &mut self.niri.screenshot_ui else {
+    pub fn handle_pick_region(
+        &mut self,
+        tx: async_channel::Sender<Option<niri_ipc::PickedRegion>>,
+    ) {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.region_select_ui.is_open()
+        {
+            let _ = tx.send_blocking(None);
+            return;
+        }
+
+        let default_output = self
+            .niri
+            .output_under_cursor()
+            .or_else(|| self.niri.layout.active_output().cloned());
+        let Some(default_output) = default_output else {
+            let _ = tx.send_blocking(None);
             return;
         };
-        let path = path.take();
+
+        self.cancel_pointing_grabs();
+        self.niri.pick_region = Some(tx);
+        self.niri
+            .region_select_ui
+            .open(self.niri.global_space.outputs().cloned(), default_output);
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::Named(CursorIcon::Crosshair));
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn confirm_pick_region(&mut self) {
+        if let Some(tx) = self.niri.pick_region.take() {
+            let region = self
+                .niri
+                .region_select_ui
+                .selected_logical_rect(&self.niri.global_space)
+                .map(|(rect, output)| niri_ipc::PickedRegion {
+                    x: rect.loc.x,
+                    y: rect.loc.y,
+                    width: rect.size.w as u32,
+                    height: rect.size.h as u32,
+                    output,
+                });
+            let _ = tx.send_blocking(region);
+        }
+        self.niri.region_select_ui.close();
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::default_named());
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn cancel_pick_region(&mut self) {
+        if let Some(tx) = self.niri.pick_region.take() {
+            let _ = tx.send_blocking(None);
+        }
+        self.niri.region_select_ui.close();
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::default_named());
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
+        let Some(path) = self.niri.screenshot_ui.take_path() else {
+            return;
+        };
+
+        let Some(stdout_tx) = self.niri.screenshot_ui.take_stdout_tx() else {
+            return;
+        };
 
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    if let Err(err) =
+                        self.niri
+                            .save_screenshot(size, pixels, write_to_disk, path, stdout_tx)
+                    {
                         warn!("error saving screenshot: {err:?}");
                     }
                 }
@@ -2685,6 +2865,7 @@ impl Niri {
         let mods_with_finger_scroll_binds = mods_with_finger_scroll_binds(mod_key, &config_.binds);
         let mods_with_tablet_stylus_binds = mods_with_tablet_stylus_binds(mod_key, &config_.binds);
 
+        let region_select_ui = RegionSelectUi::new(animation_clock.clone(), config.clone());
         let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
         let window_mru_ui = WindowMruUi::new(config.clone());
         let config_error_notification =
@@ -2759,6 +2940,8 @@ impl Niri {
                 },
             )
             .unwrap();
+
+        // let (stdout_tx, stdout_rx) = async_channel::bounded::<Vec<u8>>(1);
 
         drop(config_);
         let mut niri = Self {
@@ -2885,6 +3068,7 @@ impl Niri {
             lock_state: LockState::Unlocked,
             locked_hint: None,
 
+            region_select_ui,
             screenshot_ui,
             config_error_notification,
             hotkey_overlay,
@@ -2895,10 +3079,12 @@ impl Niri {
 
             pick_window: None,
             pick_color: None,
+            pick_region: None,
 
             debug_draw_opaque_regions: false,
             debug_draw_damage: false,
-
+            // stdout_tx,
+            // stdout_rx,
             #[cfg(feature = "dbus")]
             dbus: None,
             #[cfg(feature = "dbus")]
@@ -3257,6 +3443,15 @@ impl Niri {
             }
         }
 
+        if self.region_select_ui.close() {
+            if let Some(tx) = self.pick_region.take() {
+                let _ = tx.send_blocking(None);
+            }
+            self.cursor_manager
+                .set_cursor_image(CursorImageStatus::default_named());
+            self.queue_redraw_all();
+        }
+
         if self.screenshot_ui.close() {
             self.cursor_manager
                 .set_cursor_image(CursorImageStatus::default_named());
@@ -3308,6 +3503,24 @@ impl Niri {
             // physical coordinates.
             if old_size != size || old_scale != scale || old_transform != transform {
                 self.screenshot_ui.close();
+                self.cursor_manager
+                    .set_cursor_image(CursorImageStatus::default_named());
+                self.queue_redraw_all();
+                return;
+            }
+        }
+
+        if let Some((old_size, old_scale, old_transform)) =
+            self.region_select_ui.output_size(output)
+        {
+            let output_mode = output.current_mode().unwrap();
+            let size = transform.transform_size(output_mode.size);
+            let scale = output.current_scale().fractional_scale();
+            if old_size != size || old_scale != scale || old_transform != transform {
+                if let Some(tx) = self.pick_region.take() {
+                    let _ = tx.send_blocking(None);
+                }
+                self.region_select_ui.close();
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());
                 self.queue_redraw_all();
@@ -3485,11 +3698,7 @@ impl Niri {
                 .is_some()
         };
 
-        if layer_popup_under(Layer::Bottom) || layer_popup_under(Layer::Background) {
-            return true;
-        }
-
-        false
+        layer_popup_under(Layer::Bottom) || layer_popup_under(Layer::Background)
     }
 
     /// Returns the workspace under the position to be activated.
@@ -3500,7 +3709,11 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.exit_confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        if self.exit_confirm_dialog.is_open()
+            || self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
+        {
             return None;
         }
 
@@ -3536,6 +3749,7 @@ impl Niri {
         if self.exit_confirm_dialog.is_open()
             || self.is_locked()
             || self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
             || self.window_mru_ui.is_open()
         {
             return None;
@@ -3616,7 +3830,10 @@ impl Niri {
             return rv;
         }
 
-        if self.screenshot_ui.is_open() || self.window_mru_ui.is_open() {
+        if self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
+            || self.window_mru_ui.is_open()
+        {
             return rv;
         }
 
@@ -4357,6 +4574,7 @@ impl Niri {
         self.layout.advance_animations();
         self.config_error_notification.advance_animations();
         self.exit_confirm_dialog.advance_animations();
+        self.region_select_ui.advance_animations();
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
 
@@ -4567,6 +4785,12 @@ impl Niri {
             Kind::Unspecified,
         )
         .into();
+
+        // If the region select UI is open, draw it.
+        if self.region_select_ui.is_open() {
+            self.region_select_ui
+                .render_output(output, &mut |elem| push(elem.into()));
+        }
 
         // If the screenshot UI is open, draw it.
         if self.screenshot_ui.is_open() {
@@ -4901,6 +5125,7 @@ impl Niri {
             state.unfinished_animations_remain |=
                 self.config_error_notification.are_animations_ongoing();
             state.unfinished_animations_remain |= self.exit_confirm_dialog.are_animations_ongoing();
+            state.unfinished_animations_remain |= self.region_select_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.window_mru_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= state.screen_transition.is_some();
@@ -5373,6 +5598,7 @@ impl Niri {
         let frame_callback_time = get_monotonic_time();
 
         for mapped in self.layout.windows_for_output_mut(output) {
+            setup_force_render(&mut self.event_loop, mapped);
             mapped.send_frame(
                 output,
                 frame_callback_time,
@@ -6259,6 +6485,7 @@ impl Niri {
         write_to_disk: bool,
         include_pointer: bool,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
 
@@ -6285,7 +6512,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot(size, pixels, write_to_disk, path, stdout_tx)
             .context("error saving screenshot")
     }
 
@@ -6297,6 +6524,7 @@ impl Niri {
         write_to_disk: bool,
         show_pointer: bool,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
@@ -6353,7 +6581,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+        self.save_screenshot(geo.size, pixels, write_to_disk, path, stdout_tx)
             .context("error saving screenshot")
     }
 
@@ -6363,6 +6591,7 @@ impl Niri {
         pixels: Vec<u8>,
         write_to_disk: bool,
         path_arg: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
             .then(|| {
@@ -6397,7 +6626,7 @@ impl Niri {
             .unwrap();
 
         // Prepare to send screenshot completion event back to main thread.
-        let (event_tx, event_rx) = calloop::channel::sync_channel::<Option<String>>(1);
+        let (event_tx, event_rx) = calloop::channel::sync_channel(1);
         self.event_loop
             .insert_source(event_rx, move |event, _, state| match event {
                 calloop::channel::Event::Msg(path) => {
@@ -6420,6 +6649,11 @@ impl Niri {
             let buf: Arc<[u8]> = Arc::from(buf.into_boxed_slice());
             let _ = tx.send(buf.clone());
 
+            if let Some(stdout_tx) = stdout_tx {
+                debug!("sending image data to stdout.");
+                let _ = stdout_tx.send_blocking(buf.clone().to_vec());
+            }
+
             let mut image_path = None;
 
             if let Some((path, create_parent)) = path {
@@ -6438,7 +6672,7 @@ impl Niri {
                     }
                 }
 
-                match std::fs::write(&path, buf) {
+                match std::fs::write(&path, buf.clone()) {
                     Ok(()) => image_path = Some(path),
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
@@ -6453,7 +6687,7 @@ impl Niri {
                 warn!("error showing screenshot notification: {err:?}");
             }
 
-            // Send screenshot completion event.
+            // Send screenshot completion event and image data.
             let path_string = image_path
                 .as_ref()
                 .and_then(|p| p.to_str())
@@ -6687,6 +6921,10 @@ impl Niri {
             } => {
                 self.event_loop.remove(deadline_token);
 
+                if let Some(tx) = self.pick_region.take() {
+                    let _ = tx.send_blocking(None);
+                }
+                self.region_select_ui.close();
                 self.screenshot_ui.close();
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());

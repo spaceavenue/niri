@@ -54,6 +54,7 @@ use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
 use crate::niri::{CastTarget, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
+use crate::ui::region_select::RegionSelectUi;
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
@@ -575,10 +576,32 @@ impl State {
                         this.niri.suppressed_keys.insert(key_code);
                         return FilterResult::Intercept(None);
                     }
+
+                    if this.niri.region_select_ui.is_open() {
+                        this.cancel_pick_region();
+                        this.niri.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
                 }
+
+                if pressed && (raw == Some(Keysym::Return) || raw == Some(Keysym::KP_Enter)) {
+                    if this.niri.region_select_ui.is_open() {
+                        this.confirm_pick_region();
+                        this.niri.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
+                }
+
+                if pressed && (raw == Some(Keysym::Return) || raw == Some(Keysym::KP_Enter))
+                    && this.niri.region_select_ui.is_open() {
+                        this.confirm_pick_region();
+                        this.niri.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
 
                 if let Some(Keysym::space) = raw {
                     this.niri.screenshot_ui.set_space_down(pressed);
+                    this.niri.region_select_ui.set_space_down(pressed);
                 }
 
                 let res = {
@@ -596,6 +619,7 @@ impl State {
                         pressed,
                         *mods,
                         &this.niri.screenshot_ui,
+                        &this.niri.region_select_ui,
                         this.niri.config.borrow().input.disable_power_key_handling,
                         is_inhibiting_shortcuts,
                     )
@@ -814,6 +838,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -839,7 +864,7 @@ impl State {
                 self.niri.queue_redraw_all();
             }
             Action::Screenshot(show_cursor, path) => {
-                self.open_screenshot_ui(show_cursor, path);
+                self.open_screenshot_ui(show_cursor, path, None);
                 self.niri.cancel_mru();
             }
             Action::ScreenshotWindow(write_to_disk, show_pointer, path) => {
@@ -853,6 +878,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -877,6 +903,7 @@ impl State {
                             write_to_disk,
                             show_pointer,
                             path,
+                            None,
                         ) {
                             warn!("error taking screenshot: {err:?}");
                         }
@@ -990,6 +1017,8 @@ impl State {
             Action::MoveColumnLeft => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_left();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_left();
                 } else {
                     self.niri.layout.move_left();
                     self.maybe_warp_cursor_to_focus();
@@ -1001,6 +1030,8 @@ impl State {
             Action::MoveColumnRight => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_right();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_right();
                 } else {
                     self.niri.layout.move_right();
                     self.maybe_warp_cursor_to_focus();
@@ -1024,6 +1055,8 @@ impl State {
             Action::MoveColumnLeftOrToMonitorLeft => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_left();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_left();
                 } else if let Some(output) = self.niri.output_left() {
                     if self.niri.layout.move_column_left_or_to_output(&output)
                         && !self.maybe_warp_cursor_to_focus_centered()
@@ -1043,6 +1076,8 @@ impl State {
             Action::MoveColumnRightOrToMonitorRight => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_right();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_right();
                 } else if let Some(output) = self.niri.output_right() {
                     if self.niri.layout.move_column_right_or_to_output(&output)
                         && !self.maybe_warp_cursor_to_focus_centered()
@@ -1062,6 +1097,8 @@ impl State {
             Action::MoveWindowDown => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_down();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_down();
                 } else {
                     self.niri.layout.move_down();
                     self.maybe_warp_cursor_to_focus();
@@ -1073,6 +1110,8 @@ impl State {
             Action::MoveWindowUp => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_up();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_up();
                 } else {
                     self.niri.layout.move_up();
                     self.maybe_warp_cursor_to_focus();
@@ -1084,6 +1123,8 @@ impl State {
             Action::MoveWindowDownOrToWorkspaceDown => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_down();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_down();
                 } else {
                     self.niri.layout.move_down_or_to_workspace_down();
                     self.maybe_warp_cursor_to_focus();
@@ -1094,6 +1135,8 @@ impl State {
             Action::MoveWindowUpOrToWorkspaceUp => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.move_up();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.move_up();
                 } else {
                     self.niri.layout.move_up_or_to_workspace_up();
                     self.maybe_warp_cursor_to_focus();
@@ -1828,6 +1871,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_left_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_left() {
                     self.niri
                         .layout
@@ -1843,6 +1891,11 @@ impl State {
                     if let Some(target_output) = self.niri.output_right_of(current_output) {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
+                    }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_right_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_right() {
                     self.niri
@@ -1860,6 +1913,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_down_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_down() {
                     self.niri
                         .layout
@@ -1875,6 +1933,11 @@ impl State {
                     if let Some(target_output) = self.niri.output_up_of(current_output) {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
+                    }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_up_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_up() {
                     self.niri
@@ -1892,6 +1955,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_previous_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_previous() {
                     self.niri
                         .layout
@@ -1908,6 +1976,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_next_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_next() {
                     self.niri
                         .layout
@@ -1923,6 +1996,9 @@ impl State {
                     if self.niri.screenshot_ui.is_open() {
                         self.move_cursor_to_output(&output);
                         self.niri.screenshot_ui.move_to_output(output);
+                    } else if self.niri.region_select_ui.is_open() {
+                        self.move_cursor_to_output(&output);
+                        self.niri.region_select_ui.move_to_output(output);
                     } else {
                         self.niri
                             .layout
@@ -1969,6 +2045,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_left_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_left() {
                     self.niri.layout.move_column_to_output(&output, None, true);
                     self.niri.layout.focus_output(&output);
@@ -1982,6 +2063,11 @@ impl State {
                     if let Some(target_output) = self.niri.output_right_of(current_output) {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
+                    }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_right_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_right() {
                     self.niri.layout.move_column_to_output(&output, None, true);
@@ -1997,6 +2083,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_down_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_down() {
                     self.niri.layout.move_column_to_output(&output, None, true);
                     self.niri.layout.focus_output(&output);
@@ -2010,6 +2101,11 @@ impl State {
                     if let Some(target_output) = self.niri.output_up_of(current_output) {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
+                    }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_up_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
                     }
                 } else if let Some(output) = self.niri.output_up() {
                     self.niri.layout.move_column_to_output(&output, None, true);
@@ -2025,6 +2121,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_previous_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_previous() {
                     self.niri.layout.move_column_to_output(&output, None, true);
                     self.niri.layout.focus_output(&output);
@@ -2039,6 +2140,11 @@ impl State {
                         self.move_cursor_to_output(&target_output);
                         self.niri.screenshot_ui.move_to_output(target_output);
                     }
+                } else if let Some(current_output) = self.niri.region_select_ui.selection_output() {
+                    if let Some(target_output) = self.niri.output_next_of(current_output) {
+                        self.move_cursor_to_output(&target_output);
+                        self.niri.region_select_ui.move_to_output(target_output);
+                    }
                 } else if let Some(output) = self.niri.output_next() {
                     self.niri.layout.move_column_to_output(&output, None, true);
                     self.niri.layout.focus_output(&output);
@@ -2052,6 +2158,9 @@ impl State {
                     if self.niri.screenshot_ui.is_open() {
                         self.move_cursor_to_output(&output);
                         self.niri.screenshot_ui.move_to_output(output);
+                    } else if self.niri.region_select_ui.is_open() {
+                        self.move_cursor_to_output(&output);
+                        self.niri.region_select_ui.move_to_output(output);
                     } else {
                         self.niri.layout.move_column_to_output(&output, None, true);
                         self.niri.layout.focus_output(&output);
@@ -2067,6 +2176,11 @@ impl State {
 
                     // FIXME: granular
                     self.niri.queue_redraw_all();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.set_width(change);
+
+                    // FIXME: granular
+                    self.niri.queue_redraw_all();
                 } else {
                     self.niri.layout.set_column_width(change);
                 }
@@ -2074,6 +2188,11 @@ impl State {
             Action::SetWindowWidth(change) => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.set_width(change);
+
+                    // FIXME: granular
+                    self.niri.queue_redraw_all();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.set_width(change);
 
                     // FIXME: granular
                     self.niri.queue_redraw_all();
@@ -2091,6 +2210,11 @@ impl State {
             Action::SetWindowHeight(change) => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.set_height(change);
+
+                    // FIXME: granular
+                    self.niri.queue_redraw_all();
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.set_height(change);
 
                     // FIXME: granular
                     self.niri.queue_redraw_all();
@@ -2629,6 +2753,13 @@ impl State {
                 .to_i32_round::<i32>();
 
             self.niri.screenshot_ui.pointer_motion(point, None);
+        } else if let Some(output) = self.niri.region_select_ui.selection_output() {
+            let geom = self.niri.global_space.output_geometry(output).unwrap();
+            let point = (new_pos - geom.loc.to_f64())
+                .to_physical(output.current_scale().fractional_scale())
+                .to_i32_round::<i32>();
+
+            self.niri.region_select_ui.pointer_motion(point, None);
         }
 
         if let Some(mru_output) = self.niri.window_mru_ui.output() {
@@ -2764,6 +2895,13 @@ impl State {
                 .to_i32_round::<i32>();
 
             self.niri.screenshot_ui.pointer_motion(point, None);
+        } else if let Some(output) = self.niri.region_select_ui.selection_output() {
+            let geom = self.niri.global_space.output_geometry(output).unwrap();
+            let point = (pos - geom.loc.to_f64())
+                .to_physical(output.current_scale().fractional_scale())
+                .to_i32_round::<i32>();
+
+            self.niri.region_select_ui.pointer_motion(point, None);
         }
 
         if let Some(mru_output) = self.niri.window_mru_ui.output() {
@@ -2894,7 +3032,8 @@ impl State {
                     find_configured_bind(bindings, mod_key, trigger, mods)
                 })
                 .filter(|bind| {
-                    !self.niri.screenshot_ui.is_open() || allowed_during_screenshot(&bind.action)
+                    (!self.niri.screenshot_ui.is_open() && !self.niri.region_select_ui.is_open())
+                        || allowed_during_screenshot(&bind.action)
                 }) {
                     self.niri.suppressed_buttons.insert(button_code);
                     self.handle_bind(bind.clone());
@@ -2941,6 +3080,7 @@ impl State {
                 && mod_down
                 && !self.niri.is_locked()
                 && !self.niri.screenshot_ui.is_open()
+                && !self.niri.region_select_ui.is_open()
             {
                 let output_ws = if is_overview_open {
                     self.niri.workspace_under_cursor(true)
@@ -3117,36 +3257,67 @@ impl State {
             self.niri.focus_layer_surface_if_on_demand(layer_under);
         }
 
-        if button == Some(MouseButton::Left) && self.niri.screenshot_ui.is_open() {
-            if button_state == ButtonState::Pressed {
-                let pos = pointer.current_location();
+        if button == Some(MouseButton::Left) {
+            if self.niri.screenshot_ui.is_open() {
+                if button_state == ButtonState::Pressed {
+                    let pos = pointer.current_location();
 
-                // If we'll be moving the existing selection, use the selection output.
-                let output = if mod_down {
-                    self.niri.screenshot_ui.selection_output()
-                } else {
-                    self.niri.output_under(pos).map(|(out, _)| out)
-                };
+                    // If we'll be moving the existing selection, use the selection output.
+                    let output = if mod_down {
+                        self.niri.screenshot_ui.selection_output()
+                    } else {
+                        self.niri.output_under(pos).map(|(out, _)| out)
+                    };
 
-                if let Some(output) = output.cloned() {
-                    let geom = self.niri.global_space.output_geometry(&output).unwrap();
-                    let point = (pos - geom.loc.to_f64())
-                        .to_physical(output.current_scale().fractional_scale())
-                        .to_i32_round();
+                    if let Some(output) = output.cloned() {
+                        let geom = self.niri.global_space.output_geometry(&output).unwrap();
+                        let point = (pos - geom.loc.to_f64())
+                            .to_physical(output.current_scale().fractional_scale())
+                            .to_i32_round();
 
-                    if self
-                        .niri
-                        .screenshot_ui
-                        .pointer_down(output, point, None, mod_down)
-                    {
+                        if self
+                            .niri
+                            .screenshot_ui
+                            .pointer_down(output, point, None, mod_down)
+                        {
+                            self.niri.queue_redraw_all();
+                        }
+                    }
+                } else if let Some(capture) = self.niri.screenshot_ui.pointer_up(None) {
+                    if capture {
+                        self.confirm_screenshot(true);
+                    } else {
                         self.niri.queue_redraw_all();
                     }
                 }
-            } else if let Some(capture) = self.niri.screenshot_ui.pointer_up(None) {
-                if capture {
-                    self.confirm_screenshot(true);
+            } else if self.niri.region_select_ui.is_open() {
+                if button_state == ButtonState::Pressed {
+                    let pos = pointer.current_location();
+
+                    // If we'll be moving the existing selection, use the selection output.
+                    let output = if mod_down {
+                        self.niri.region_select_ui.selection_output()
+                    } else {
+                        self.niri.output_under(pos).map(|(out, _)| out)
+                    };
+
+                    if let Some(output) = output.cloned() {
+                        let geom = self.niri.global_space.output_geometry(&output).unwrap();
+                        let point = (pos - geom.loc.to_f64())
+                            .to_physical(output.current_scale().fractional_scale())
+                            .to_i32_round();
+
+                        if self
+                            .niri
+                            .region_select_ui
+                            .pointer_down(output, point, None, mod_down)
+                        {
+                            self.niri.queue_redraw_all();
+                        }
+                    }
                 } else {
-                    self.niri.queue_redraw_all();
+                    self.niri.region_select_ui.pointer_up(None);
+                    self.confirm_pick_region();
                 }
             }
         }
@@ -3257,7 +3428,8 @@ impl State {
                                 mods,
                             )
                             .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
+                                (!self.niri.screenshot_ui.is_open()
+                                    && !self.niri.region_select_ui.is_open())
                                     || allowed_during_screenshot(&bind.action)
                             });
                             let bind_right = find_configured_bind(
@@ -3267,7 +3439,8 @@ impl State {
                                 mods,
                             )
                             .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
+                                (!self.niri.screenshot_ui.is_open()
+                                    && !self.niri.region_select_ui.is_open())
                                     || allowed_during_screenshot(&bind.action)
                             });
                             (bind_left, bind_right)
@@ -3363,13 +3536,15 @@ impl State {
                             mods,
                         )
                         .filter(|bind| {
-                            !self.niri.screenshot_ui.is_open()
+                            (!self.niri.screenshot_ui.is_open()
+                                && !self.niri.region_select_ui.is_open())
                                 || allowed_during_screenshot(&bind.action)
                         });
                         let bind_down =
                             find_configured_bind(bindings, mod_key, Trigger::WheelScrollDown, mods)
                                 .filter(|bind| {
-                                    !self.niri.screenshot_ui.is_open()
+                                    (!self.niri.screenshot_ui.is_open()
+                                        && !self.niri.region_select_ui.is_open())
                                         || allowed_during_screenshot(&bind.action)
                                 });
                         (bind_up, bind_down)
@@ -3515,13 +3690,15 @@ impl State {
                         mods,
                     )
                     .filter(|bind| {
-                        !self.niri.screenshot_ui.is_open()
+                        (!self.niri.screenshot_ui.is_open()
+                            && !self.niri.region_select_ui.is_open())
                             || allowed_during_screenshot(&bind.action)
                     });
                     let bind_right =
                         find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollRight, mods)
                             .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
+                                (!self.niri.screenshot_ui.is_open()
+                                    && !self.niri.region_select_ui.is_open())
                                     || allowed_during_screenshot(&bind.action)
                             });
                     drop(config);
@@ -3553,13 +3730,15 @@ impl State {
                         mods,
                     )
                     .filter(|bind| {
-                        !self.niri.screenshot_ui.is_open()
+                        (!self.niri.screenshot_ui.is_open()
+                            && !self.niri.region_select_ui.is_open())
                             || allowed_during_screenshot(&bind.action)
                     });
                     let bind_down =
                         find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollDown, mods)
                             .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
+                                (!self.niri.screenshot_ui.is_open()
+                                    && !self.niri.region_select_ui.is_open())
                                     || allowed_during_screenshot(&bind.action)
                             });
                     drop(config);
@@ -3673,6 +3852,13 @@ impl State {
                 .to_i32_round::<i32>();
 
             self.niri.screenshot_ui.pointer_motion(point, None);
+        } else if let Some(output) = self.niri.region_select_ui.selection_output() {
+            let geom = self.niri.global_space.output_geometry(output).unwrap();
+            let point = (pos - geom.loc.to_f64())
+                .to_physical(output.current_scale().fractional_scale())
+                .to_i32_round::<i32>();
+
+            self.niri.region_select_ui.pointer_motion(point, None);
         }
 
         if let Some(mru_output) = self.niri.window_mru_ui.output() {
@@ -3778,6 +3964,27 @@ impl State {
                                 self.niri.queue_redraw_all();
                             }
                         }
+                    } else if self.niri.region_select_ui.is_open() {
+                        let output = if mod_down {
+                            self.niri.region_select_ui.selection_output()
+                        } else {
+                            under.output.as_ref()
+                        };
+
+                        if let Some(output) = output.cloned() {
+                            let geom = self.niri.global_space.output_geometry(&output).unwrap();
+                            let point = (pos - geom.loc.to_f64())
+                                .to_physical(output.current_scale().fractional_scale())
+                                .to_i32_round();
+
+                            if self
+                                .niri
+                                .region_select_ui
+                                .pointer_down(output, point, None, mod_down)
+                            {
+                                self.niri.queue_redraw_all();
+                            }
+                        }
                     } else if let Some(mru_output) = self.niri.window_mru_ui.output() {
                         if let Some((output, pos_within_output)) = self.niri.output_under(pos) {
                             if mru_output == output {
@@ -3868,6 +4075,9 @@ impl State {
                     } else {
                         self.niri.queue_redraw_all();
                     }
+                } else if self.niri.region_select_ui.is_open() {
+                    self.niri.region_select_ui.pointer_up(None);
+                    self.confirm_pick_region();
                 }
 
                 tool.up(self, &tablet::tool::UpEvent { serial, time });
@@ -3988,7 +4198,8 @@ impl State {
                             find_configured_bind(bindings, mod_key, trigger, mods)
                         }
                         .filter(|bind| {
-                            !self.niri.screenshot_ui.is_open()
+                            (!self.niri.screenshot_ui.is_open()
+                                && !self.niri.region_select_ui.is_open())
                                 || allowed_during_screenshot(&bind.action)
                         });
                         if let Some(bind) = bind {
@@ -4017,7 +4228,10 @@ impl State {
     }
 
     fn on_gesture_swipe_begin<I: InputBackend>(&mut self, event: I::GestureSwipeBeginEvent) {
-        if self.niri.window_mru_ui.is_open() || self.niri.screenshot_ui.is_open() {
+        if self.niri.window_mru_ui.is_open()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.region_select_ui.is_open()
+        {
             // Don't start swipe gestures while in the compositor UI.
             return;
         }
@@ -4393,6 +4607,27 @@ impl State {
                     self.niri.queue_redraw_all();
                 }
             }
+        } else if self.niri.region_select_ui.is_open() {
+            let output = if mod_down {
+                self.niri.region_select_ui.selection_output()
+            } else {
+                under.output.as_ref()
+            };
+
+            if let Some(output) = output.cloned() {
+                let geom = self.niri.global_space.output_geometry(&output).unwrap();
+                let point = (pos - geom.loc.to_f64())
+                    .to_physical(output.current_scale().fractional_scale())
+                    .to_i32_round();
+
+                if self
+                    .niri
+                    .region_select_ui
+                    .pointer_down(output, point, Some(slot), mod_down)
+                {
+                    self.niri.queue_redraw_all();
+                }
+            }
         } else if let Some(mru_output) = self.niri.window_mru_ui.output() {
             if let Some((output, pos_within_output)) = self.niri.output_under(pos) {
                 if mru_output == output {
@@ -4493,6 +4728,9 @@ impl State {
             } else {
                 self.niri.queue_redraw_all();
             }
+        } else if self.niri.region_select_ui.is_open() {
+            self.niri.region_select_ui.pointer_up(Some(slot));
+            self.confirm_pick_region();
         }
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -4521,6 +4759,14 @@ impl State {
                 .to_i32_round::<i32>();
 
             self.niri.screenshot_ui.pointer_motion(point, Some(slot));
+            self.niri.queue_redraw(&output);
+        } else if let Some(output) = self.niri.region_select_ui.selection_output().cloned() {
+            let geom = self.niri.global_space.output_geometry(&output).unwrap();
+            let point = (pos - geom.loc.to_f64())
+                .to_physical(output.current_scale().fractional_scale())
+                .to_i32_round::<i32>();
+
+            self.niri.region_select_ui.pointer_motion(point, Some(slot));
             self.niri.queue_redraw(&output);
         }
 
@@ -4608,6 +4854,7 @@ fn should_intercept_key<'a>(
     pressed: bool,
     mods: ModifiersState,
     screenshot_ui: &ScreenshotUi,
+    region_select_ui: &RegionSelectUi,
     disable_power_key_handling: bool,
     is_inhibiting_shortcuts: bool,
 ) -> FilterResult<Option<Bind>> {
@@ -4657,6 +4904,14 @@ fn should_intercept_key<'a>(
                     hotkey_overlay_title: None,
                 });
             }
+        }
+    } else if region_select_ui.is_open() {
+        if let Some(bind) = &final_bind {
+            if !allowed_during_screenshot(&bind.action) {
+                final_bind = None;
+            }
+        } else {
+            return FilterResult::Intercept(None);
         }
     }
 
