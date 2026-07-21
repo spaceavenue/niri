@@ -79,6 +79,10 @@ pub struct WindowRule {
     pub background_effect: BackgroundEffectRule,
     #[knuffel(child, default)]
     pub popups: PopupsRule,
+    #[knuffel(child, unwrap(argument))]
+    pub force_render: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub force_render_fps: Option<u16>,
 }
 
 /// Rules for popup surfaces.
