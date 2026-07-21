@@ -64,6 +64,7 @@ pub enum ScreenshotUi {
         clock: Clock,
         config: Rc<RefCell<Config>>,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     },
 }
 
@@ -143,6 +144,7 @@ impl ScreenshotUi {
         default_output: Output,
         show_pointer: bool,
         path: Option<String>,
+        stdout_tx: Option<async_channel::Sender<Vec<u8>>>,
     ) -> bool {
         if screenshots.is_empty() {
             return false;
@@ -238,6 +240,7 @@ impl ScreenshotUi {
             clock: clock.clone(),
             config: config.clone(),
             path,
+            stdout_tx,
         };
 
         self.update_buffers();
