@@ -85,6 +85,8 @@ pub enum Request {
     PickWindow,
     /// Request picking a color from the screen.
     PickColor,
+    /// Request picking a region from the screen and get its dimensions.
+    PickRegion,
     /// Perform an action.
     Action(Action),
     /// Change output configuration temporarily.
@@ -159,6 +161,8 @@ pub enum Response {
     PickedWindow(Option<Window>),
     /// Information about the picked color.
     PickedColor(Option<PickedColor>),
+    /// Information about the picked region.
+    PickedRegion(Option<PickedRegion>),
     /// Output configuration change result.
     OutputConfigChanged(OutputConfigChanged),
     /// Information about the overview.
@@ -181,6 +185,30 @@ pub struct Overview {
 pub struct PickedColor {
     /// Color values as red, green, blue, each ranging from 0.0 to 1.0.
     pub rgb: [f64; 3],
+}
+
+/// Region picked from the screen.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct PickedRegion {
+    /// X-axis coordinates of the region.
+    pub x: i32,
+    /// Y-axis coordinates of the region.
+    pub y: i32,
+    /// Width of the region.
+    pub width: u32,
+    /// Height of the region.
+    pub height: u32,
+    /// Output to capture on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+impl std::fmt::Display for PickedRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{},{} {}x{}", self.x, self.y, self.width, self.height)
+    }
 }
 
 /// Actions that niri can perform.
