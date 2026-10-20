@@ -184,6 +184,7 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
+use crate::ui::region_select::RegionSelectUi;
 use crate::ui::screen_transition::{self, ScreenTransition};
 use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
@@ -456,6 +457,7 @@ pub struct Niri {
     // State that we last sent to the logind LockedHint.
     pub locked_hint: Option<bool>,
 
+    pub region_select_ui: RegionSelectUi,
     pub screenshot_ui: ScreenshotUi,
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
@@ -468,6 +470,7 @@ pub struct Niri {
 
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
+    pub pick_region: Option<async_channel::Sender<Option<niri_ipc::PickedRegion>>>,
 
     pub debug_draw_opaque_regions: bool,
     pub debug_draw_damage: bool,
@@ -1249,6 +1252,7 @@ impl State {
         if !self.niri.exit_confirm_dialog.is_open()
             && !self.niri.is_locked()
             && !self.niri.screenshot_ui.is_open()
+            && !self.niri.region_select_ui.is_open()
         {
             // Don't refresh cursor focus during transitions.
             if let Some((output, _)) = self.niri.output_under(location) {
@@ -2266,7 +2270,10 @@ impl State {
     }
 
     pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
-        if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.region_select_ui.is_open()
+        {
             return;
         }
 
@@ -2332,6 +2339,71 @@ impl State {
         self.niri
             .cursor_manager
             .set_cursor_image(CursorImageStatus::Named(CursorIcon::Crosshair));
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn handle_pick_region(
+        &mut self,
+        tx: async_channel::Sender<Option<niri_ipc::PickedRegion>>,
+    ) {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.region_select_ui.is_open()
+        {
+            let _ = tx.send_blocking(None);
+            return;
+        }
+
+        let default_output = self
+            .niri
+            .output_under_cursor()
+            .or_else(|| self.niri.layout.active_output().cloned());
+        let Some(default_output) = default_output else {
+            let _ = tx.send_blocking(None);
+            return;
+        };
+
+        self.cancel_pointing_grabs();
+        self.niri.pick_region = Some(tx);
+        self.niri
+            .region_select_ui
+            .open(self.niri.global_space.outputs().cloned(), default_output);
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::Named(CursorIcon::Crosshair));
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn confirm_pick_region(&mut self) {
+        if let Some(tx) = self.niri.pick_region.take() {
+            let region = self
+                .niri
+                .region_select_ui
+                .selected_logical_rect(&self.niri.global_space)
+                .map(|(rect, output)| niri_ipc::PickedRegion {
+                    x: rect.loc.x,
+                    y: rect.loc.y,
+                    width: rect.size.w as u32,
+                    height: rect.size.h as u32,
+                    output,
+                });
+            let _ = tx.send_blocking(region);
+        }
+        self.niri.region_select_ui.close();
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::default_named());
+        self.niri.queue_redraw_all();
+    }
+
+    pub fn cancel_pick_region(&mut self) {
+        if let Some(tx) = self.niri.pick_region.take() {
+            let _ = tx.send_blocking(None);
+        }
+        self.niri.region_select_ui.close();
+        self.niri
+            .cursor_manager
+            .set_cursor_image(CursorImageStatus::default_named());
         self.niri.queue_redraw_all();
     }
 
@@ -2809,6 +2881,7 @@ impl Niri {
         let mods_with_finger_scroll_binds = mods_with_finger_scroll_binds(mod_key, &config_.binds);
         let mods_with_tablet_stylus_binds = mods_with_tablet_stylus_binds(mod_key, &config_.binds);
 
+        let region_select_ui = RegionSelectUi::new(animation_clock.clone(), config.clone());
         let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
         let window_mru_ui = WindowMruUi::new(config.clone());
         let config_error_notification =
@@ -3017,6 +3090,7 @@ impl Niri {
             lock_state: LockState::Unlocked,
             locked_hint: None,
 
+            region_select_ui,
             screenshot_ui,
             config_error_notification,
             hotkey_overlay,
@@ -3029,6 +3103,7 @@ impl Niri {
 
             pick_window: None,
             pick_color: None,
+            pick_region: None,
 
             debug_draw_opaque_regions: false,
             debug_draw_damage: false,
@@ -3393,6 +3468,15 @@ impl Niri {
             }
         }
 
+        if self.region_select_ui.close() {
+            if let Some(tx) = self.pick_region.take() {
+                let _ = tx.send_blocking(None);
+            }
+            self.cursor_manager
+                .set_cursor_image(CursorImageStatus::default_named());
+            self.queue_redraw_all();
+        }
+
         if self.screenshot_ui.close() {
             self.cursor_manager
                 .set_cursor_image(CursorImageStatus::default_named());
@@ -3450,6 +3534,24 @@ impl Niri {
             // physical coordinates.
             if old_size != size || old_scale != scale || old_transform != transform {
                 self.screenshot_ui.close();
+                self.cursor_manager
+                    .set_cursor_image(CursorImageStatus::default_named());
+                self.queue_redraw_all();
+                return;
+            }
+        }
+
+        if let Some((old_size, old_scale, old_transform)) =
+            self.region_select_ui.output_size(output)
+        {
+            let output_mode = output.current_mode().unwrap();
+            let size = transform.transform_size(output_mode.size);
+            let scale = output.current_scale().fractional_scale();
+            if old_size != size || old_scale != scale || old_transform != transform {
+                if let Some(tx) = self.pick_region.take() {
+                    let _ = tx.send_blocking(None);
+                }
+                self.region_select_ui.close();
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());
                 self.queue_redraw_all();
@@ -3650,7 +3752,11 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.exit_confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        if self.exit_confirm_dialog.is_open()
+            || self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
+        {
             return None;
         }
 
@@ -3686,6 +3792,7 @@ impl Niri {
         if self.exit_confirm_dialog.is_open()
             || self.is_locked()
             || self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
             || self.window_mru_ui.is_open()
         {
             return None;
@@ -3824,7 +3931,10 @@ impl Niri {
             return rv;
         }
 
-        if self.screenshot_ui.is_open() || self.window_mru_ui.is_open() {
+        if self.screenshot_ui.is_open()
+            || self.region_select_ui.is_open()
+            || self.window_mru_ui.is_open()
+        {
             return rv;
         }
 
@@ -4620,6 +4730,7 @@ impl Niri {
         self.layout.advance_animations();
         self.config_error_notification.advance_animations();
         self.exit_confirm_dialog.advance_animations();
+        self.region_select_ui.advance_animations();
         self.screenshot_ui.advance_animations();
         self.window_mru_ui.advance_animations();
 
@@ -4884,6 +4995,12 @@ impl Niri {
             Kind::Unspecified,
         )
         .into();
+
+        // If the region select UI is open, draw it.
+        if self.region_select_ui.is_open() {
+            self.region_select_ui
+                .render_output(output, &mut |elem| push(elem.into()));
+        }
 
         // If the screenshot UI is open, draw it.
         if self.screenshot_ui.is_open() {
@@ -5232,6 +5349,7 @@ impl Niri {
             state.unfinished_animations_remain |=
                 self.config_error_notification.are_animations_ongoing();
             state.unfinished_animations_remain |= self.exit_confirm_dialog.are_animations_ongoing();
+            state.unfinished_animations_remain |= self.region_select_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= self.window_mru_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= state.screen_transition.is_some();
@@ -7223,6 +7341,10 @@ impl Niri {
             } => {
                 self.event_loop.remove(deadline_token);
 
+                if let Some(tx) = self.pick_region.take() {
+                    let _ = tx.send_blocking(None);
+                }
+                self.region_select_ui.close();
                 self.screenshot_ui.close();
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());

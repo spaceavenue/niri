@@ -259,6 +259,10 @@ pub enum Action {
     CancelScreenshot,
     #[knuffel(skip)]
     ScreenshotTogglePointer,
+    #[knuffel(skip)]
+    ConfirmPickRegion,
+    #[knuffel(skip)]
+    CancelPickRegion,
     Screenshot(
         #[knuffel(property(name = "show-pointer"), default = true)] bool,
         // Path; not settable from knuffel
