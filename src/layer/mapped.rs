@@ -167,11 +167,7 @@ impl MappedLayer {
         }
 
         let state = self.surface.cached_state();
-        if state.exclusive_zone != ExclusiveZone::DontCare {
-            return false;
-        }
-
-        true
+        state.exclusive_zone == ExclusiveZone::DontCare
     }
 
     pub fn bob_offset(&self) -> Point<f64, Logical> {

@@ -80,10 +80,14 @@ pub struct WindowRule {
     pub pinch_sensitivity: Option<FloatOrInt<0, 100>>,
     #[knuffel(child, unwrap(argument))]
     pub tiled_state: Option<bool>,
+    #[knuffel(child, unwrap(argument))]
+    pub force_render: Option<u16>,
     #[knuffel(child, default)]
     pub background_effect: BackgroundEffectRule,
     #[knuffel(child, default)]
     pub popups: PopupsRule,
+    #[knuffel(child, unwrap(argument))]
+    pub force_render_fps: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
